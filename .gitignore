@@ -1,0 +1,16 @@
+# Keil build output
+Objects/
+Listings/
+DebugConfig/
+
+# Keil per-user UI state
+*.uvguix.*
+
+# Local Codex workspace data
+.agents/
+
+# Temporary files
+*.bak
+*.tmp
+*.log
+*~

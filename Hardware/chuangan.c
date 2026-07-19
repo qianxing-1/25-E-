@@ -1,0 +1,28 @@
+#include "stm32f10x.h"                  // Device header
+
+#define L1 GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_12)//读取 PB12
+#define L2 GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_13)//读取 PB13
+#define L3 GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_14)//读取 PB14
+                                                                
+#define Z GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_15)//读取 PB15
+
+#define R1 GPIO_ReadInputDataBit(GPIOA,GPIO_Pin_12)//读取 PA12
+#define R2 GPIO_ReadInputDataBit(GPIOA,GPIO_Pin_15)//读取 PA15
+#define R3 GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_3)//读取 PB3           传感器从左到右分别为L1,L2,L3,Z,R1,R2,R3
+
+void chuangan_Init(void)
+{
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+	
+	GPIO_InitTypeDef GPIO_InitStructure;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3|GPIO_Pin_12|GPIO_Pin_13|GPIO_Pin_14|GPIO_Pin_15;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOB, &GPIO_InitStructure);
+	
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_12|GPIO_Pin_15;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+}
