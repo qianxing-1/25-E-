@@ -40,25 +40,39 @@ void STEP_PWM_Init(void)
 
 void STEP_PWM_SetFreq(uint32_t freq)
 {
+    static uint32_t current_freq = 0;
     uint32_t arr;
 
-    TIM_CCxCmd(TIM1, TIM_Channel_4, TIM_CCx_Disable);
-    TIM_Cmd(TIM1, DISABLE);
-    TIM_SetCounter(TIM1, 0);
-
     if (freq == 0)
+    {
+        TIM_CCxCmd(TIM1, TIM_Channel_4, TIM_CCx_Disable);
+        TIM_Cmd(TIM1, DISABLE);
+        TIM_SetCounter(TIM1, 0);
+        current_freq = 0;
         return;
+    }
 
     if (freq > 20000)
         freq = 20000;
     if (freq < 16)
         freq = 16;
 
+    if (freq == current_freq)
+        return;
+
     arr = 1000000 / freq - 1;
     TIM_SetAutoreload(TIM1, arr);
     TIM_SetCompare4(TIM1, (arr + 1) / 2);
-    TIM_GenerateEvent(TIM1, TIM_EventSource_Update);
-    TIM_ClearFlag(TIM1, TIM_FLAG_Update);
-    TIM_CCxCmd(TIM1, TIM_Channel_4, TIM_CCx_Enable);
-    TIM_Cmd(TIM1, ENABLE);
+
+    if (current_freq == 0)
+    {
+        TIM_SetCounter(TIM1, 0);
+        TIM_GenerateEvent(TIM1, TIM_EventSource_Update);
+        TIM_ClearFlag(TIM1, TIM_FLAG_Update);
+        TIM_CCxCmd(TIM1, TIM_Channel_4, TIM_CCx_Enable);
+        TIM_Cmd(TIM1, ENABLE);
+    }
+
+    /* While running, preload the new period without resetting the pulse. */
+    current_freq = freq;
 }
