@@ -477,6 +477,32 @@ def rect_tuple(rect_obj):
         values = rect_obj
     return (int(values[0]), int(values[1]), int(values[2]), int(values[3]))
 
+
+def rect_corners(rect_obj):
+    try:
+        values = rect_obj.corners()
+        if values is not None and len(values) >= 4:
+            return [
+                (int(values[0][0]), int(values[0][1])),
+                (int(values[1][0]), int(values[1][1])),
+                (int(values[2][0]), int(values[2][1])),
+                (int(values[3][0]), int(values[3][1])),
+            ]
+    except BaseException:
+        pass
+
+    try:
+        if len(rect_obj) >= 12:
+            return [
+                (int(rect_obj[4]), int(rect_obj[5])),
+                (int(rect_obj[6]), int(rect_obj[7])),
+                (int(rect_obj[8]), int(rect_obj[9])),
+                (int(rect_obj[10]), int(rect_obj[11])),
+            ]
+    except BaseException:
+        pass
+    return None
+
 # ============================================================
 # 透视补偿模块 — 单应矩阵反算真实靶心
 # ============================================================
@@ -534,38 +560,33 @@ def _homo_map(H,x,y):
     if abs(z)<1e-6: return None,None
     return (H[0]*x+H[1]*y+H[2])/z, (H[3]*x+H[4]*y+H[5])/z
 
-def perspective_center(r):
-    if not HOMO_ENABLE:
-        return (int(r[0]+r[2]//2), int(r[1]+r[3]//2))
-    x,y,w,h = r[0],r[1],r[2],r[3]
-    if w<10 or h<10:
-        return (int(x+w//2), int(y+h//2))
-    src=[(x,y),(x+w,y),(x+w,y+h),(x,y+h)]
-    dst=[(0,0),(HOMO_PAPER_W,0),(HOMO_PAPER_W,HOMO_PAPER_H),(0,HOMO_PAPER_H)]
-    H=_homo_matrix(src,dst)
-    if H is None: return (int(x+w//2),int(y+h//2))
-    Hi=_homo_invert(H)
-    if Hi is None: return (int(x+w//2),int(y+h//2))
-    cx,cy=_homo_map(Hi,HOMO_PAPER_W*0.5,HOMO_PAPER_H*0.5)
-    if cx is None: return (int(x+w//2),int(y+h//2))
-    return (int(cx),int(cy))
+def perspective_center(rect_obj):
+    corners = rect_corners(rect_obj)
+    if corners is None:
+        x, y, w, h = rect_tuple(rect_obj)
+        return (int(x + w // 2), int(y + h // 2))
+
+    x1, y1 = corners[0]
+    x2, y2 = corners[2]
+    x3, y3 = corners[1]
+    x4, y4 = corners[3]
+    denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+
+    if abs(denominator) < 0.001:
+        return (
+            int((x1 + x2 + x3 + x4) // 4),
+            int((y1 + y2 + y3 + y4) // 4),
+        )
+
+    t = float((x1 - x3) * (y3 - y4) -
+              (y1 - y3) * (x3 - x4)) / denominator
+    return (int(x1 + t * (x2 - x1)), int(y1 + t * (y2 - y1)))
 
 # 计算矩形几何中心点，兼容轮廓角点与普通矩形
 def rect_center(rect_obj):
-    try:
-        corners = rect_obj.corners()
-        sx = 0
-        sy = 0
-        count = 0
-        # 轮廓四点取平均坐标
-        for p in corners:
-            sx += p[0]
-            sy += p[1]
-            count += 1
-        if count:
-            return (int(sx // count), int(sy // count))
-    except BaseException:
-        pass
+    corners = rect_corners(rect_obj)
+    if corners is not None:
+        return perspective_center(rect_obj)
     # 普通矩形直接计算中心
     x, y, w, h = rect_tuple(rect_obj)
     return (int(x + w // 2), int(y + h // 2))
@@ -616,7 +637,7 @@ def find_target_rect(img):
     if USE_CV_LITE and HAS_CV_LITE:
         try:
             # 调用硬件加速灰度矩形检测接口
-            raw = cv_lite.grayscale_find_rectangles(
+            raw = cv_lite.rgb888_find_rectangles_with_corners(
                 [PROC_H, PROC_W],
                 img.to_numpy_ref(),
                 CANNY_THRESH1,
@@ -627,15 +648,10 @@ def find_target_rect(img):
                 GAUSSIAN_BLUR_SIZE,
             )
 
-            # 一维数组转矩形元组列表，每4个值一个矩形(x,y,w,h)
-            rects = []
-            for i in range(0, len(raw), 4):
-                rects.append((raw[i], raw[i + 1], raw[i + 2], raw[i + 3]))
-
             # 筛选最优目标返回
-            target = choose_target_rect(rects)
+            target = choose_target_rect(raw)
             if target is not None:
-                return rect_tuple(target)
+                return target
             return None
         except BaseException as error:
             # 硬件加速异常，关闭标记切换软件路径
@@ -646,7 +662,7 @@ def find_target_rect(img):
     target = choose_target_rect(img.find_rects(threshold=RECT_THRESHOLD))
     if target is None:
         return None
-    return rect_tuple(target)
+    return target
 
 # 从光斑列表中筛选最优激光点，优先高亮、靠近装甲目标
 def choose_laser_blob(blobs, target_point=None):
@@ -825,7 +841,7 @@ def camera_init():
 
     # 通道1：灰度320×240画面，专门用于目标识别算法
     sensor.set_framesize(width=PROC_W, height=PROC_H, chn=CAM_CHN_ID_1)
-    sensor.set_pixformat(Sensor.GRAYSCALE, chn=CAM_CHN_ID_1)
+    sensor.set_pixformat(Sensor.RGB888, chn=CAM_CHN_ID_1)
 
     # 显示屏初始化ST7701 LCD，开启OSD图层
     Display.init(
@@ -922,11 +938,12 @@ def main():
                     detect_dt = elapsed_seconds(now_detect_ms, last_detect_ms)
                     last_detect_ms = now_detect_ms
                 # 执行矩形装甲识别
-                detected_rect = find_target_rect(img)
+                detected_target = find_target_rect(img)
 
                 # 识别到有效装甲
-                if detected_rect is not None:
-                    measured_point = perspective_center(detected_rect)
+                if detected_target is not None:
+                    measured_point = perspective_center(detected_target)
+                    detected_rect = rect_tuple(detected_target)
                     # 卡尔曼滤波平滑原始坐标
                     if KALMAN_ENABLE:
                         measured_point = target_filter.update(measured_point, detect_dt)
