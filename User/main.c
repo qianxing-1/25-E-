@@ -15,8 +15,10 @@ volatile int16_t Gimbal_Target_Offset_X = 0;
 volatile uint32_t SystemTickMs = 0;
 
 #define SCREEN_CENTER_X          320
-#define ERROR_DEADBAND           3
-#define CENTER_SETTLE_MS         300
+#define CENTER_ENTER_ERROR       5
+#define CENTER_EXIT_ERROR        8
+#define ERROR_DEADBAND           CENTER_ENTER_ERROR
+#define CENTER_SETTLE_MS         200
 #define TARGET_STALE_MS          150
 
 /* 1.8 degree motor, 8 microsteps: 400 pulses make 90 degrees. */
@@ -25,12 +27,13 @@ volatile uint32_t SystemTickMs = 0;
 
 #define SEARCH_FAST_SPEED        200
 #define SEARCH_TIMEOUT_MS        4000
+#define AIM_TIMEOUT_MS           3000
 
 static uint8_t LaserOn = 0;
 static uint8_t CurrentMode = 1;
 static uint8_t ModeActive = 0;
 static volatile uint8_t TrackingEnabled = 0;
-static uint8_t Mode4Settling = 0;
+static volatile uint8_t Mode4Settling = 0;
 static uint32_t Mode4SettleStartMs = 0;
 static uint32_t Mode4LastFrameId = 0;
 
@@ -120,16 +123,18 @@ static void Mode1_TurnLeft90(void)
  */
 static uint8_t SearchAndAim(uint8_t initial_direction)
 {
-    uint32_t start_ms = SystemTickMs;
+    uint32_t search_start_ms = SystemTickMs;
+    uint32_t aim_start_ms = 0;
     uint32_t last_frame_id = 0;
     uint32_t settle_start_ms = 0;
     uint8_t settling = 0;
     uint8_t searching = 1;
+    uint8_t target_acquired = 0;
 
     ResetAimPID();
     StartFastSearch(initial_direction);
 
-    while ((uint32_t)(SystemTickMs - start_ms) < SEARCH_TIMEOUT_MS)
+    while (1)
     {
         uint16_t target_x;
         uint16_t target_y;
@@ -139,9 +144,24 @@ static uint8_t SearchAndAim(uint8_t initial_direction)
         Serial_ReadTarget(&target_x, &target_y, &last_rx_ms, &frame_id);
         (void)target_y;
 
+        if (!target_acquired)
+        {
+            if ((uint32_t)(SystemTickMs - search_start_ms) >= SEARCH_TIMEOUT_MS)
+                break;
+        }
+        else if ((uint32_t)(SystemTickMs - aim_start_ms) >= AIM_TIMEOUT_MS)
+        {
+            break;
+        }
+
         if (!TargetIsFresh(target_x, last_rx_ms))
         {
             settling = 0;
+            if (target_acquired)
+            {
+                target_acquired = 0;
+                search_start_ms = SystemTickMs;
+            }
             if (!searching)
             {
                 ResetAimPID();
@@ -155,23 +175,32 @@ static uint8_t SearchAndAim(uint8_t initial_direction)
             last_frame_id = frame_id;
             searching = 0;
 
-            if (error >= -ERROR_DEADBAND && error <= ERROR_DEADBAND)
+            if (!target_acquired)
+            {
+                target_acquired = 1;
+                aim_start_ms = SystemTickMs;
+            }
+
+            if (!settling &&
+                error >= -CENTER_ENTER_ERROR && error <= CENTER_ENTER_ERROR)
             {
                 StopMotor();
-                if (!settling)
+                settle_start_ms = SystemTickMs;
+                settling = 1;
+            }
+            else if (settling)
+            {
+                if (error < -CENTER_EXIT_ERROR || error > CENTER_EXIT_ERROR)
                 {
-                    settle_start_ms = SystemTickMs;
-                    settling = 1;
+                    settling = 0;
+                    EMM_Visual_Control(&Yaw_Motor, &Yaw_PID, (float)error);
                 }
                 else if ((uint32_t)(SystemTickMs - settle_start_ms) >=
                          CENTER_SETTLE_MS)
-                {
                     return 1;
-                }
             }
             else
             {
-                settling = 0;
                 EMM_Visual_Control(&Yaw_Motor, &Yaw_PID, (float)error);
             }
         }
@@ -308,12 +337,20 @@ int main(void)
                 {
                     int16_t error = (int16_t)target_x - SCREEN_CENTER_X;
 
-                    if (error >= -ERROR_DEADBAND && error <= ERROR_DEADBAND)
+                    if (!Mode4Settling &&
+                        error >= -CENTER_ENTER_ERROR &&
+                        error <= CENTER_ENTER_ERROR)
                     {
-                        if (!Mode4Settling)
+                        StopMotor();
+                        Mode4SettleStartMs = SystemTickMs;
+                        Mode4Settling = 1;
+                    }
+                    else if (Mode4Settling)
+                    {
+                        if (error < -CENTER_EXIT_ERROR ||
+                            error > CENTER_EXIT_ERROR)
                         {
-                            Mode4SettleStartMs = SystemTickMs;
-                            Mode4Settling = 1;
+                            Mode4Settling = 0;
                         }
                         else if ((uint32_t)(SystemTickMs - Mode4SettleStartMs) >=
                                  CENTER_SETTLE_MS)
@@ -322,10 +359,6 @@ int main(void)
                             Laser_On();
                             OLED_ShowString(4, 7, "ON ");
                         }
-                    }
-                    else
-                    {
-                        Mode4Settling = 0;
                     }
                 }
                 else
@@ -350,7 +383,11 @@ void TIM2_IRQHandler(void)
         {
             if (TrackingEnabled)
             {
-                if (x != 0 &&
+                if (Mode4Settling)
+                {
+                    StopMotor();
+                }
+                else if (x != 0 &&
                     (uint32_t)(SystemTickMs - Serial_LastRxMs) <= TARGET_STALE_MS)
                 {
                     int16_t error = Gimbal_Target_Offset_X;

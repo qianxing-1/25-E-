@@ -106,8 +106,8 @@ void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
     }
     else
     {
-        min_speed = 60.0f;
-        max_speed = 120.0f;
+        min_speed = 16.0f;
+        max_speed = 60.0f;
     }
 
     if (speed > 0.0f)
