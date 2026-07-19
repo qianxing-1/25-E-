@@ -17,9 +17,11 @@ volatile uint32_t SystemTickMs = 0;
 #define SCREEN_CENTER_X          320
 #define CENTER_ENTER_ERROR       5
 #define CENTER_EXIT_ERROR        8
+#define CENTER_FINAL_ERROR       4
 #define ERROR_DEADBAND           CENTER_ENTER_ERROR
 #define CENTER_SETTLE_MS         200
 #define TARGET_STALE_MS          150
+#define FINAL_APPROACH_DIRECTION 0
 
 /* 1.8 degree motor, 8 microsteps: 400 pulses make 90 degrees. */
 #define MODE1_STEP_FREQ          200
@@ -182,7 +184,8 @@ static uint8_t SearchAndAim(uint8_t initial_direction)
             }
 
             if (!settling &&
-                error >= -CENTER_ENTER_ERROR && error <= CENTER_ENTER_ERROR)
+                error >= -CENTER_ENTER_ERROR && error <= CENTER_ENTER_ERROR &&
+                Yaw_Motor.Direction == FINAL_APPROACH_DIRECTION)
             {
                 StopMotor();
                 settle_start_ms = SystemTickMs;
@@ -197,7 +200,14 @@ static uint8_t SearchAndAim(uint8_t initial_direction)
                 }
                 else if ((uint32_t)(SystemTickMs - settle_start_ms) >=
                          CENTER_SETTLE_MS)
-                    return 1;
+                {
+                    if (error >= -CENTER_FINAL_ERROR &&
+                        error <= CENTER_FINAL_ERROR)
+                        return 1;
+
+                    settling = 0;
+                    EMM_Visual_Control(&Yaw_Motor, &Yaw_PID, (float)error);
+                }
             }
             else
             {
