@@ -2,6 +2,10 @@
 #include "EMM_Gimbal.h"
 #include "Delay.h"
 
+static float Mode4_Current_Speed = 0.0f;
+static uint8_t Mode4_Pending_Direction = 0;
+static uint8_t Mode4_Direction_Count = 0;
+
 void EMM_Motor_Init(EMM_Motor *motor)
 {
     GPIO_InitTypeDef gpio;
@@ -137,6 +141,58 @@ void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
     }
 
     EMM_Set_Speed(motor, (speed > 0.0f) ? speed : -speed);
+}
+
+void EMM_Mode4_Reset(void)
+{
+    Mode4_Current_Speed = 0.0f;
+    Mode4_Direction_Count = 0;
+}
+
+void EMM_Mode4_Control(EMM_Motor *motor, PID_Controller *pid,
+                       float image_error)
+{
+    float target_speed = PID_Calculate(pid, image_error);
+    float speed_delta;
+    float abs_speed;
+    uint8_t desired_direction = (target_speed > 0.0f) ? 0 : 1;
+
+    if (desired_direction != motor->Direction)
+    {
+        if (Mode4_Pending_Direction != desired_direction)
+        {
+            Mode4_Pending_Direction = desired_direction;
+            Mode4_Direction_Count = 1;
+            STEP_PWM_SetFreq(0);
+            motor->Step_Frequency = 0;
+            Mode4_Current_Speed = 0.0f;
+            return;
+        }
+
+        Mode4_Direction_Count++;
+        if (Mode4_Direction_Count < 2)
+            return;
+
+        STEP_PWM_SetFreq(0);
+        motor->Step_Frequency = 0;
+        Mode4_Current_Speed = 0.0f;
+        EMM_Set_Direction(motor, desired_direction);
+        Delay_us(5);
+    }
+    Mode4_Direction_Count = 0;
+
+    abs_speed = (target_speed > 0.0f) ? target_speed : -target_speed;
+    if (abs_speed < 16.0f)
+        abs_speed = 16.0f;
+
+    speed_delta = abs_speed - Mode4_Current_Speed;
+    if (speed_delta > 80.0f)
+        speed_delta = 80.0f;
+    else if (speed_delta < -80.0f)
+        speed_delta = -80.0f;
+
+    Mode4_Current_Speed += speed_delta;
+    EMM_Set_Speed(motor, Mode4_Current_Speed);
 }
 
 void EMM_Set_Speed(EMM_Motor *motor, float frequency)

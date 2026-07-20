@@ -20,6 +20,7 @@ volatile uint32_t SystemTickMs = 0;
 #define CENTER_FINAL_ERROR       4
 #define ERROR_DEADBAND           CENTER_ENTER_ERROR
 #define CENTER_SETTLE_MS         200
+#define MODE4_LASER_CONFIRM_MS   80
 #define TARGET_STALE_MS          150
 
 /* 1.8 degree motor, 8 microsteps: 400 pulses make 90 degrees. */
@@ -34,8 +35,8 @@ static uint8_t LaserOn = 0;
 static uint8_t CurrentMode = 1;
 static uint8_t ModeActive = 0;
 static volatile uint8_t TrackingEnabled = 0;
-static volatile uint8_t Mode4Settling = 0;
-static uint32_t Mode4SettleStartMs = 0;
+static uint8_t Mode4LaserChecking = 0;
+static uint32_t Mode4LaserStartMs = 0;
 static uint32_t Mode4LastFrameId = 0;
 
 EMM_Motor Yaw_Motor;
@@ -251,10 +252,11 @@ static void Mode3_SearchRight(void)
 static void Mode4_StartTracking(void)
 {
     TrackingEnabled = 1;
-    Mode4Settling = 0;
-    Mode4SettleStartMs = 0;
+    Mode4LaserChecking = 0;
+    Mode4LaserStartMs = 0;
     Mode4LastFrameId = 0;
     ResetAimPID();
+    EMM_Mode4_Reset();
     OLED_Clear();
     OLED_ShowString(1, 1, "Mode:4 Align");
     OLED_ShowString(2, 1, "X:         ");
@@ -345,33 +347,28 @@ int main(void)
                 {
                     int16_t error = (int16_t)target_x - SCREEN_CENTER_X;
 
-                    if (!Mode4Settling &&
-                        error >= -CENTER_ENTER_ERROR &&
-                        error <= CENTER_ENTER_ERROR)
+                    if (error >= -CENTER_FINAL_ERROR &&
+                        error <= CENTER_FINAL_ERROR)
                     {
-                        StopMotor();
-                        Mode4SettleStartMs = SystemTickMs;
-                        Mode4Settling = 1;
-                    }
-                    else if (Mode4Settling)
-                    {
-                        if (error < -CENTER_EXIT_ERROR ||
-                            error > CENTER_EXIT_ERROR)
+                        if (!Mode4LaserChecking)
                         {
-                            Mode4Settling = 0;
+                            Mode4LaserStartMs = SystemTickMs;
+                            Mode4LaserChecking = 1;
                         }
-                        else if ((uint32_t)(SystemTickMs - Mode4SettleStartMs) >=
-                                 CENTER_SETTLE_MS)
+                        else if ((uint32_t)(SystemTickMs - Mode4LaserStartMs) >=
+                                 MODE4_LASER_CONFIRM_MS)
                         {
-                            StopMotor();
                             Laser_On();
                             OLED_ShowString(4, 7, "ON ");
+                            Mode4LaserChecking = 0;
                         }
                     }
+                    else
+                        Mode4LaserChecking = 0;
                 }
                 else
                 {
-                    Mode4Settling = 0;
+                    Mode4LaserChecking = 0;
                 }
             }
         }
@@ -391,22 +388,24 @@ void TIM2_IRQHandler(void)
         {
             if (TrackingEnabled)
             {
-                if (Mode4Settling)
-                {
-                    StopMotor();
-                }
-                else if (x != 0 &&
+                if (x != 0 &&
                     (uint32_t)(SystemTickMs - Serial_LastRxMs) <= TARGET_STALE_MS)
                 {
                     int16_t error = Gimbal_Target_Offset_X;
                     if (error > ERROR_DEADBAND || error < -ERROR_DEADBAND)
-                        EMM_Visual_Control(&Yaw_Motor, &Yaw_PID, (float)error);
+                        EMM_Mode4_Control(&Yaw_Motor, &Yaw_PID, (float)error);
                     else
-                        StopMotor();
+                    {
+                        STEP_PWM_SetFreq(0);
+                        Yaw_Motor.Step_Frequency = 0;
+                        EMM_Enable(&Yaw_Motor);
+                        EMM_Mode4_Reset();
+                    }
                 }
                 else
                 {
                     StopMotor();
+                    EMM_Mode4_Reset();
                 }
             }
             tim_10ms = 0;
