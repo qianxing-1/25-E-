@@ -2,12 +2,6 @@
 #include "EMM_Gimbal.h"
 #include "Delay.h"
 
-#define TRACK_ACCEL_STEP_HZ  40.0f
-#define TRACK_DECEL_STEP_HZ  80.0f
-#define TRACK_MIN_SPEED_HZ   16.0f
-
-static float Tracking_Current_Speed = 0.0f;
-
 void EMM_Motor_Init(EMM_Motor *motor)
 {
     GPIO_InitTypeDef gpio;
@@ -143,70 +137,6 @@ void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
     }
 
     EMM_Set_Speed(motor, (speed > 0.0f) ? speed : -speed);
-}
-
-void EMM_Tracking_Reset(void)
-{
-    Tracking_Current_Speed = 0.0f;
-}
-
-void EMM_Tracking_Control(EMM_Motor *motor, PID_Controller *pid,
-                          float image_error)
-{
-    float target_speed = PID_Calculate(pid, image_error);
-    float delta;
-    float abs_speed;
-    uint8_t desired_direction;
-
-    if (target_speed > 0.0f && target_speed < TRACK_MIN_SPEED_HZ)
-        target_speed = TRACK_MIN_SPEED_HZ;
-    else if (target_speed < 0.0f && target_speed > -TRACK_MIN_SPEED_HZ)
-        target_speed = -TRACK_MIN_SPEED_HZ;
-
-    /* Ramp to zero before reversing to prevent direction shocks. */
-    if (Tracking_Current_Speed * target_speed < 0.0f)
-        target_speed = 0.0f;
-
-    delta = target_speed - Tracking_Current_Speed;
-    if (Tracking_Current_Speed > 0.0f && delta < 0.0f)
-    {
-        if (delta < -TRACK_DECEL_STEP_HZ)
-            delta = -TRACK_DECEL_STEP_HZ;
-    }
-    else if (Tracking_Current_Speed < 0.0f && delta > 0.0f)
-    {
-        if (delta > TRACK_DECEL_STEP_HZ)
-            delta = TRACK_DECEL_STEP_HZ;
-    }
-    else
-    {
-        if (delta > TRACK_ACCEL_STEP_HZ)
-            delta = TRACK_ACCEL_STEP_HZ;
-        else if (delta < -TRACK_ACCEL_STEP_HZ)
-            delta = -TRACK_ACCEL_STEP_HZ;
-    }
-
-    Tracking_Current_Speed += delta;
-    if (Tracking_Current_Speed > -0.5f && Tracking_Current_Speed < 0.5f)
-    {
-        Tracking_Current_Speed = 0.0f;
-        STEP_PWM_SetFreq(0);
-        motor->Step_Frequency = 0;
-        return;
-    }
-
-    desired_direction = (Tracking_Current_Speed > 0.0f) ? 0 : 1;
-    if (desired_direction != motor->Direction)
-    {
-        STEP_PWM_SetFreq(0);
-        motor->Step_Frequency = 0;
-        EMM_Set_Direction(motor, desired_direction);
-        Delay_us(5);
-    }
-
-    abs_speed = (Tracking_Current_Speed > 0.0f) ?
-                Tracking_Current_Speed : -Tracking_Current_Speed;
-    EMM_Set_Speed(motor, abs_speed);
 }
 
 void EMM_Set_Speed(EMM_Motor *motor, float frequency)

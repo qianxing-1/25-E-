@@ -93,17 +93,17 @@ SMOOTH_PREVIOUS_PERCENT = 55
 CENTER_FILTER_ENABLE = True    # 自适应一阶平滑总开关
 CENTER_NEAR_DISTANCE = 1.5     # 近距离判定阈值（像素），目标小幅晃动
 CENTER_FAR_DISTANCE = 8.0      # 远距离判定阈值（像素），目标大幅移动
-CENTER_ALPHA_NEAR = 0.45       # 小幅运动提高新坐标权重，降低连续跟踪滞后
-CENTER_ALPHA_MIDDLE = 0.72     # 中等运动快速跟随
-CENTER_ALPHA_FAR = 0.92        # 大幅运动优先响应当前测量
+CENTER_ALPHA_NEAR = 0.18       # 近距离平滑系数，数值越小越顺滑、响应越慢
+CENTER_ALPHA_MIDDLE = 0.52     # 中等距离平滑系数
+CENTER_ALPHA_FAR = 0.88        # 远距离平滑系数，数值越大跟随越快
 CENTER_HOLD_DETECTIONS = 0     # 丢失目标立即发送(0,0)，禁止旧坐标触发瞄准
 
 # 匀速卡尔曼跟踪器（过滤矩形中心抖动，丢帧可短时预测位置）
-KALMAN_ENABLE = True           # 启用位置速度估计和短时超前补偿
-KALMAN_PROCESS_NOISE = 60.0    # 提高对小车速度变化的响应
-KALMAN_MEASUREMENT_NOISE = 6.0 # 保留适量测量平滑
+KALMAN_ENABLE = False          # 卡尔曼滤波总开关，高速移动自瞄建议开启
+KALMAN_PROCESS_NOISE = 25.0    # 过程噪声，越大允许目标速度变化越大
+KALMAN_MEASUREMENT_NOISE = 5.0 # 测量噪声，越大越信任历史预测、不信任单帧检测
 KALMAN_INITIAL_UNCERTAINTY = 50.0 # 初始位置不确定度
-KALMAN_LEAD_SECONDS = 0.025    # 补偿图像处理、串口和电机响应延迟
+KALMAN_LEAD_SECONDS = 0.015    # 超前预测时间，抵消图像+串口传输延迟
 TARGET_HOLD_DETECTIONS = 0     # 丢帧保持预测的最大帧数
 
 # 云台PID控制参数（基于画面误差计算输出速度）
@@ -946,9 +946,9 @@ def main():
                     detected_rect = rect_tuple(detected_target)
                     # 卡尔曼滤波平滑原始坐标
                     if KALMAN_ENABLE:
-                        target_point = target_filter.update(measured_point, detect_dt)
-                    else:
-                        target_point = center_filter.update(measured_point)
+                        measured_point = target_filter.update(measured_point, detect_dt)
+                    # 自适应一阶平滑二次防抖
+                    target_point = center_filter.update(measured_point)
                     # 将矩形跟随平滑中心点平移，用于OSD绘制
                     last_target_rect = move_rect_to_center(detected_rect, target_point)
                     missed_detections = 0
