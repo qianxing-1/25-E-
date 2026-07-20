@@ -93,9 +93,9 @@ SMOOTH_PREVIOUS_PERCENT = 55
 CENTER_FILTER_ENABLE = True    # 自适应一阶平滑总开关
 CENTER_NEAR_DISTANCE = 1.5     # 近距离判定阈值（像素），目标小幅晃动
 CENTER_FAR_DISTANCE = 8.0      # 远距离判定阈值（像素），目标大幅移动
-CENTER_ALPHA_NEAR = 0.18       # 近距离平滑系数，数值越小越顺滑、响应越慢
-CENTER_ALPHA_MIDDLE = 0.52     # 中等距离平滑系数
-CENTER_ALPHA_FAR = 0.88        # 远距离平滑系数，数值越大跟随越快
+CENTER_ALPHA_NEAR = 0.38       # 小幅运动减少滤波滞后，同时保留静止防抖
+CENTER_ALPHA_MIDDLE = 0.68     # 中等运动提高响应速度
+CENTER_ALPHA_FAR = 0.90        # 大幅运动优先跟随当前测量
 CENTER_HOLD_DETECTIONS = 0     # 丢失目标立即发送(0,0)，禁止旧坐标触发瞄准
 
 # 匀速卡尔曼跟踪器（过滤矩形中心抖动，丢帧可短时预测位置）

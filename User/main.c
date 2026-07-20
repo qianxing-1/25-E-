@@ -38,6 +38,7 @@ static volatile uint8_t TrackingEnabled = 0;
 static uint8_t Mode4LaserChecking = 0;
 static uint32_t Mode4LaserStartMs = 0;
 static uint32_t Mode4LastFrameId = 0;
+static volatile uint32_t Mode4ControlLastFrameId = 0;
 
 EMM_Motor Yaw_Motor;
 PID_Controller Yaw_PID;
@@ -255,6 +256,7 @@ static void Mode4_StartTracking(void)
     Mode4LaserChecking = 0;
     Mode4LaserStartMs = 0;
     Mode4LastFrameId = 0;
+    Mode4ControlLastFrameId = 0;
     ResetAimPID();
     EMM_Mode4_Reset();
     OLED_Clear();
@@ -391,15 +393,12 @@ void TIM2_IRQHandler(void)
                 if (x != 0 &&
                     (uint32_t)(SystemTickMs - Serial_LastRxMs) <= TARGET_STALE_MS)
                 {
-                    int16_t error = Gimbal_Target_Offset_X;
-                    if (error > ERROR_DEADBAND || error < -ERROR_DEADBAND)
-                        EMM_Mode4_Control(&Yaw_Motor, &Yaw_PID, (float)error);
-                    else
+                    uint32_t frame_id = Serial_RxFrameCount;
+                    if (frame_id != Mode4ControlLastFrameId)
                     {
-                        STEP_PWM_SetFreq(0);
-                        Yaw_Motor.Step_Frequency = 0;
-                        EMM_Enable(&Yaw_Motor);
-                        EMM_Mode4_Reset();
+                        Mode4ControlLastFrameId = frame_id;
+                        EMM_Mode4_Control(&Yaw_Motor, &Yaw_PID,
+                                          (float)Gimbal_Target_Offset_X);
                     }
                 }
                 else

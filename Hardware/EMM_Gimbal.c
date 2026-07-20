@@ -2,9 +2,20 @@
 #include "EMM_Gimbal.h"
 #include "Delay.h"
 
+#define MODE4_ENTER_ERROR       3.0f
+#define MODE4_EXIT_ERROR        7.0f
+#define MODE4_LOCK_VELOCITY     1.2f
+#define MODE4_UNLOCK_VELOCITY   2.0f
+#define MODE4_KP_SCALE          1.4f
+#define MODE4_VELOCITY_GAIN     18.0f
+#define MODE4_ACCEL_STEP_HZ     120.0f
+#define MODE4_DECEL_STEP_HZ     180.0f
+
 static float Mode4_Current_Speed = 0.0f;
-static uint8_t Mode4_Pending_Direction = 0;
-static uint8_t Mode4_Direction_Count = 0;
+static float Mode4_Last_Error = 0.0f;
+static float Mode4_Error_Velocity = 0.0f;
+static uint8_t Mode4_Initialized = 0;
+static uint8_t Mode4_Center_Locked = 0;
 
 void EMM_Motor_Init(EMM_Motor *motor)
 {
@@ -146,50 +157,104 @@ void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
 void EMM_Mode4_Reset(void)
 {
     Mode4_Current_Speed = 0.0f;
-    Mode4_Direction_Count = 0;
+    Mode4_Last_Error = 0.0f;
+    Mode4_Error_Velocity = 0.0f;
+    Mode4_Initialized = 0;
+    Mode4_Center_Locked = 0;
 }
 
 void EMM_Mode4_Control(EMM_Motor *motor, PID_Controller *pid,
                        float image_error)
 {
-    float target_speed = PID_Calculate(pid, image_error);
+    float abs_error = (image_error >= 0.0f) ? image_error : -image_error;
+    float error_delta;
+    float target_speed;
     float speed_delta;
     float abs_speed;
-    uint8_t desired_direction = (target_speed > 0.0f) ? 0 : 1;
+    uint8_t desired_direction;
 
-    if (desired_direction != motor->Direction)
+    if (!Mode4_Initialized)
     {
-        if (Mode4_Pending_Direction != desired_direction)
+        Mode4_Last_Error = image_error;
+        Mode4_Initialized = 1;
+    }
+
+    error_delta = image_error - Mode4_Last_Error;
+    Mode4_Last_Error = image_error;
+    Mode4_Error_Velocity = 0.6f * Mode4_Error_Velocity +
+                           0.4f * error_delta;
+
+    if (Mode4_Center_Locked)
+    {
+        float abs_velocity = (Mode4_Error_Velocity >= 0.0f) ?
+                             Mode4_Error_Velocity : -Mode4_Error_Velocity;
+        if (abs_error < MODE4_EXIT_ERROR &&
+            abs_velocity < MODE4_UNLOCK_VELOCITY)
         {
-            Mode4_Pending_Direction = desired_direction;
-            Mode4_Direction_Count = 1;
             STEP_PWM_SetFreq(0);
             motor->Step_Frequency = 0;
+            EMM_Enable(motor);
             Mode4_Current_Speed = 0.0f;
             return;
         }
+        Mode4_Center_Locked = 0;
+    }
 
-        Mode4_Direction_Count++;
-        if (Mode4_Direction_Count < 2)
+    if (abs_error <= MODE4_ENTER_ERROR)
+    {
+        float abs_velocity = (Mode4_Error_Velocity >= 0.0f) ?
+                             Mode4_Error_Velocity : -Mode4_Error_Velocity;
+        if (abs_velocity <= MODE4_LOCK_VELOCITY)
+        {
+            STEP_PWM_SetFreq(0);
+            motor->Step_Frequency = 0;
+            EMM_Enable(motor);
+            Mode4_Current_Speed = 0.0f;
+            Mode4_Error_Velocity = 0.0f;
+            Mode4_Center_Locked = 1;
             return;
+        }
+    }
+
+    target_speed = pid->Kp * MODE4_KP_SCALE * image_error +
+                   MODE4_VELOCITY_GAIN * Mode4_Error_Velocity;
+    if (target_speed > pid->Max_Output)
+        target_speed = pid->Max_Output;
+    if (target_speed < pid->Min_Output)
+        target_speed = pid->Min_Output;
+
+    desired_direction = (target_speed > 0.0f) ? 0 : 1;
+    if (Mode4_Current_Speed != 0.0f &&
+        desired_direction != motor->Direction)
+    {
+        Mode4_Current_Speed -= MODE4_DECEL_STEP_HZ;
+        if (Mode4_Current_Speed > 0.0f)
+        {
+            EMM_Set_Speed(motor, Mode4_Current_Speed);
+            return;
+        }
 
         STEP_PWM_SetFreq(0);
         motor->Step_Frequency = 0;
         Mode4_Current_Speed = 0.0f;
+        return;
+    }
+
+    if (desired_direction != motor->Direction)
+    {
         EMM_Set_Direction(motor, desired_direction);
         Delay_us(5);
     }
-    Mode4_Direction_Count = 0;
 
     abs_speed = (target_speed > 0.0f) ? target_speed : -target_speed;
     if (abs_speed < 16.0f)
         abs_speed = 16.0f;
 
     speed_delta = abs_speed - Mode4_Current_Speed;
-    if (speed_delta > 80.0f)
-        speed_delta = 80.0f;
-    else if (speed_delta < -80.0f)
-        speed_delta = -80.0f;
+    if (speed_delta > MODE4_ACCEL_STEP_HZ)
+        speed_delta = MODE4_ACCEL_STEP_HZ;
+    else if (speed_delta < -MODE4_DECEL_STEP_HZ)
+        speed_delta = -MODE4_DECEL_STEP_HZ;
 
     Mode4_Current_Speed += speed_delta;
     EMM_Set_Speed(motor, Mode4_Current_Speed);
