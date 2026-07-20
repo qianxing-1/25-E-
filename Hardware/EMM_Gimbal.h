@@ -45,4 +45,7 @@ float PID_Calculate(PID_Controller *pid, float error);
 /* ---- 视觉跟踪控制 (PID + 电机方向/速度) ---- */
 void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
                         float image_error);
+void EMM_Tracking_Control(EMM_Motor *motor, PID_Controller *pid,
+                          float image_error);
+void EMM_Tracking_Reset(void);
 #endif
