@@ -22,6 +22,15 @@ volatile uint32_t SystemTickMs = 0;
 #define CENTER_SETTLE_MS         200
 #define TARGET_STALE_MS          150
 
+/* Mode 4 compensates image/UART age and target motion before PID control. */
+#define MODE4_CONTROL_PERIOD_MS  5
+#define MODE4_BASE_PREDICT_MS    25
+#define MODE4_MAX_PREDICT_MS     60
+#define MODE4_FEEDFORWARD_GAIN   0.30f
+#define MODE4_MOVING_SPEED       30
+#define MODE4_STABLE_FRAMES      4
+#define MODE4_MAX_TARGET_SPEED   1500
+
 /* 1.8 degree motor, 8 microsteps: 400 pulses make 90 degrees. */
 #define MODE1_STEP_FREQ          200
 #define MODE1_DURATION_MS        2000
@@ -34,9 +43,13 @@ static uint8_t LaserOn = 0;
 static uint8_t CurrentMode = 1;
 static uint8_t ModeActive = 0;
 static volatile uint8_t TrackingEnabled = 0;
-static volatile uint8_t Mode4Settling = 0;
-static uint32_t Mode4SettleStartMs = 0;
 static uint32_t Mode4LastFrameId = 0;
+static volatile uint32_t Mode4LastControlFrameId = 0;
+static volatile uint32_t Mode4LastSampleMs = 0;
+static volatile uint16_t Mode4LastTargetX = 0;
+static volatile int16_t Mode4TargetVelocityX = 0;
+static volatile int16_t Mode4PredictedErrorX = 0;
+static uint8_t Mode4StableFrames = 0;
 
 EMM_Motor Yaw_Motor;
 PID_Controller Yaw_PID;
@@ -251,9 +264,13 @@ static void Mode3_SearchRight(void)
 static void Mode4_StartTracking(void)
 {
     TrackingEnabled = 1;
-    Mode4Settling = 0;
-    Mode4SettleStartMs = 0;
     Mode4LastFrameId = 0;
+    Mode4LastControlFrameId = 0;
+    Mode4LastSampleMs = 0;
+    Mode4LastTargetX = 0;
+    Mode4TargetVelocityX = 0;
+    Mode4PredictedErrorX = 0;
+    Mode4StableFrames = 0;
     ResetAimPID();
     OLED_Clear();
     OLED_ShowString(1, 1, "Mode:4 Align");
@@ -272,7 +289,7 @@ void Yaw_Init(void)
     Yaw_Motor.ENA_Pin = GPIO_Pin_12;
     EMM_Motor_Init(&Yaw_Motor);
 
-    PID_Init(&Yaw_PID, 5.0f, 0.0f, 0.0f, 600.0f, -600.0f);
+    PID_Init(&Yaw_PID, 5.0f, 0.0f, 0.0f, 1000.0f, -1000.0f);
 }
 
 int main(void)
@@ -345,33 +362,29 @@ int main(void)
                 {
                     int16_t error = (int16_t)target_x - SCREEN_CENTER_X;
 
-                    if (!Mode4Settling &&
-                        error >= -CENTER_ENTER_ERROR &&
-                        error <= CENTER_ENTER_ERROR)
+                    /* Do not stop the tracking loop while waiting for stable frames. */
+                    if (error >= -CENTER_ENTER_ERROR &&
+                        error <= CENTER_ENTER_ERROR &&
+                        Mode4PredictedErrorX >= -CENTER_FINAL_ERROR &&
+                        Mode4PredictedErrorX <= CENTER_FINAL_ERROR)
                     {
-                        StopMotor();
-                        Mode4SettleStartMs = SystemTickMs;
-                        Mode4Settling = 1;
+                        if (Mode4StableFrames < MODE4_STABLE_FRAMES)
+                            Mode4StableFrames++;
                     }
-                    else if (Mode4Settling)
+                    else
                     {
-                        if (error < -CENTER_EXIT_ERROR ||
-                            error > CENTER_EXIT_ERROR)
-                        {
-                            Mode4Settling = 0;
-                        }
-                        else if ((uint32_t)(SystemTickMs - Mode4SettleStartMs) >=
-                                 CENTER_SETTLE_MS)
-                        {
-                            StopMotor();
-                            Laser_On();
-                            OLED_ShowString(4, 7, "ON ");
-                        }
+                        Mode4StableFrames = 0;
+                    }
+
+                    if (Mode4StableFrames >= MODE4_STABLE_FRAMES)
+                    {
+                        Laser_On();
+                        OLED_ShowString(4, 7, "ON ");
                     }
                 }
                 else
                 {
-                    Mode4Settling = 0;
+                    Mode4StableFrames = 0;
                 }
             }
         }
@@ -380,36 +393,103 @@ int main(void)
 
 void TIM2_IRQHandler(void)
 {
-    static uint16_t tim_10ms = 0;
+    static uint16_t control_tick_ms = 0;
 
     if (TIM_GetITStatus(TIM2, TIM_IT_Update) == SET)
     {
         SystemTickMs++;
-        tim_10ms++;
+        control_tick_ms++;
 
-        if (tim_10ms >= 10)
+        if (control_tick_ms >= MODE4_CONTROL_PERIOD_MS)
         {
             if (TrackingEnabled)
             {
-                if (Mode4Settling)
+                uint16_t target_x;
+                uint16_t target_y;
+                uint32_t last_rx_ms;
+                uint32_t frame_id;
+
+                Serial_ReadTarget(&target_x, &target_y, &last_rx_ms, &frame_id);
+                (void)target_y;
+
+                if (target_x != 0 &&
+                    (uint32_t)(SystemTickMs - last_rx_ms) <= TARGET_STALE_MS)
                 {
-                    StopMotor();
-                }
-                else if (x != 0 &&
-                    (uint32_t)(SystemTickMs - Serial_LastRxMs) <= TARGET_STALE_MS)
-                {
-                    int16_t error = Gimbal_Target_Offset_X;
-                    if (error > ERROR_DEADBAND || error < -ERROR_DEADBAND)
-                        EMM_Visual_Control(&Yaw_Motor, &Yaw_PID, (float)error);
-                    else
-                        StopMotor();
+                    /* Estimate target motion only when a new vision frame arrives. */
+                    if (frame_id != Mode4LastControlFrameId)
+                    {
+                        uint32_t sample_ms = last_rx_ms;
+
+                        Mode4LastControlFrameId = frame_id;
+                        if (Mode4LastSampleMs != 0 && sample_ms != Mode4LastSampleMs)
+                        {
+                            uint32_t dt_ms = (uint32_t)(sample_ms - Mode4LastSampleMs);
+                            int32_t delta_x =
+                                (int32_t)target_x - (int32_t)Mode4LastTargetX;
+
+                            if (dt_ms >= 5 && dt_ms <= 250)
+                            {
+                                int32_t measured_velocity = delta_x * 1000 / (int32_t)dt_ms;
+                                if (measured_velocity > MODE4_MAX_TARGET_SPEED)
+                                    measured_velocity = MODE4_MAX_TARGET_SPEED;
+                                if (measured_velocity < -MODE4_MAX_TARGET_SPEED)
+                                    measured_velocity = -MODE4_MAX_TARGET_SPEED;
+
+                                /* Low-pass the estimate so one noisy frame cannot jerk the motor. */
+                                Mode4TargetVelocityX =
+                                    (int16_t)((Mode4TargetVelocityX * 55 +
+                                               measured_velocity * 45) / 100);
+                            }
+                        }
+                        Mode4LastTargetX = target_x;
+                        Mode4LastSampleMs = sample_ms;
+                    }
+
+                    {
+                        uint32_t data_age_ms =
+                            (uint32_t)(SystemTickMs - last_rx_ms);
+                        uint32_t predict_ms =
+                            MODE4_BASE_PREDICT_MS + data_age_ms;
+                        int32_t predicted_error;
+                        float speed_feedforward;
+
+                        if (predict_ms > MODE4_MAX_PREDICT_MS)
+                            predict_ms = MODE4_MAX_PREDICT_MS;
+
+                        predicted_error = (int32_t)target_x - SCREEN_CENTER_X;
+                        predicted_error +=
+                            (int32_t)Mode4TargetVelocityX * predict_ms / 1000;
+
+                        if (predicted_error > 32767)
+                            predicted_error = 32767;
+                        if (predicted_error < -32768)
+                            predicted_error = -32768;
+                        Mode4PredictedErrorX = (int16_t)predicted_error;
+
+                        speed_feedforward =
+                            MODE4_FEEDFORWARD_GAIN * (float)Mode4TargetVelocityX;
+
+                        if (predicted_error > ERROR_DEADBAND ||
+                            predicted_error < -ERROR_DEADBAND ||
+                            Mode4TargetVelocityX > MODE4_MOVING_SPEED ||
+                            Mode4TargetVelocityX < -MODE4_MOVING_SPEED)
+                            EMM_Visual_Control_FF(&Yaw_Motor, &Yaw_PID,
+                                                  (float)predicted_error,
+                                                  speed_feedforward);
+                        else
+                            StopMotor();
+                    }
                 }
                 else
                 {
                     StopMotor();
+                    Mode4TargetVelocityX = 0;
+                    Mode4LastSampleMs = 0;
+                    Mode4LastControlFrameId = Serial_RxFrameCount;
+                    Mode4PredictedErrorX = 0;
                 }
             }
-            tim_10ms = 0;
+            control_tick_ms = 0;
         }
 
         Key_Tick();
