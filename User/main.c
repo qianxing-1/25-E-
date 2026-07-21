@@ -22,12 +22,8 @@ volatile uint32_t SystemTickMs = 0;
 #define CENTER_SETTLE_MS         200
 #define TARGET_STALE_MS          150
 
-/* Mode 4 compensates image/UART age and target motion before PID control. */
-#define MODE4_CONTROL_PERIOD_MS  5
-#define MODE4_BASE_PREDICT_MS    25
-#define MODE4_MAX_PREDICT_MS     60
-#define MODE4_FEEDFORWARD_GAIN   0.30f
-#define MODE4_MOVING_SPEED       30
+/* Mode 4 uses a short prediction to compensate for UART and motor latency. */
+#define MODE4_PREDICT_MS         25
 #define MODE4_STABLE_FRAMES      4
 #define MODE4_MAX_TARGET_SPEED   1500
 
@@ -393,39 +389,32 @@ int main(void)
 
 void TIM2_IRQHandler(void)
 {
-    static uint16_t control_tick_ms = 0;
+    static uint16_t tim_10ms = 0;
 
     if (TIM_GetITStatus(TIM2, TIM_IT_Update) == SET)
     {
         SystemTickMs++;
-        control_tick_ms++;
+        tim_10ms++;
 
-        if (control_tick_ms >= MODE4_CONTROL_PERIOD_MS)
+        if (tim_10ms >= 10)
         {
             if (TrackingEnabled)
             {
-                uint16_t target_x;
-                uint16_t target_y;
-                uint32_t last_rx_ms;
-                uint32_t frame_id;
-
-                Serial_ReadTarget(&target_x, &target_y, &last_rx_ms, &frame_id);
-                (void)target_y;
-
-                if (target_x != 0 &&
-                    (uint32_t)(SystemTickMs - last_rx_ms) <= TARGET_STALE_MS)
+                if (x != 0 &&
+                    (uint32_t)(SystemTickMs - Serial_LastRxMs) <= TARGET_STALE_MS)
                 {
+                    uint32_t frame_id = Serial_RxFrameCount;
+
                     /* Estimate target motion only when a new vision frame arrives. */
                     if (frame_id != Mode4LastControlFrameId)
                     {
-                        uint32_t sample_ms = last_rx_ms;
+                        uint32_t sample_ms = Serial_LastRxMs;
 
                         Mode4LastControlFrameId = frame_id;
                         if (Mode4LastSampleMs != 0 && sample_ms != Mode4LastSampleMs)
                         {
                             uint32_t dt_ms = (uint32_t)(sample_ms - Mode4LastSampleMs);
-                            int32_t delta_x =
-                                (int32_t)target_x - (int32_t)Mode4LastTargetX;
+                            int32_t delta_x = (int32_t)x - (int32_t)Mode4LastTargetX;
 
                             if (dt_ms >= 5 && dt_ms <= 250)
                             {
@@ -441,44 +430,29 @@ void TIM2_IRQHandler(void)
                                                measured_velocity * 45) / 100);
                             }
                         }
-                        Mode4LastTargetX = target_x;
+                        Mode4LastTargetX = x;
                         Mode4LastSampleMs = sample_ms;
+
+                        {
+                            int32_t predicted_error = (int32_t)x - SCREEN_CENTER_X;
+                            predicted_error +=
+                                (int32_t)Mode4TargetVelocityX * MODE4_PREDICT_MS / 1000;
+
+                            if (predicted_error > 32767)
+                                predicted_error = 32767;
+                            if (predicted_error < -32768)
+                                predicted_error = -32768;
+                            Mode4PredictedErrorX = (int16_t)predicted_error;
+
+                            if (predicted_error > ERROR_DEADBAND ||
+                                predicted_error < -ERROR_DEADBAND)
+                                EMM_Visual_Control(&Yaw_Motor, &Yaw_PID,
+                                                   (float)predicted_error);
+                            else
+                                StopMotor();
+                        }
                     }
-
-                    {
-                        uint32_t data_age_ms =
-                            (uint32_t)(SystemTickMs - last_rx_ms);
-                        uint32_t predict_ms =
-                            MODE4_BASE_PREDICT_MS + data_age_ms;
-                        int32_t predicted_error;
-                        float speed_feedforward;
-
-                        if (predict_ms > MODE4_MAX_PREDICT_MS)
-                            predict_ms = MODE4_MAX_PREDICT_MS;
-
-                        predicted_error = (int32_t)target_x - SCREEN_CENTER_X;
-                        predicted_error +=
-                            (int32_t)Mode4TargetVelocityX * predict_ms / 1000;
-
-                        if (predicted_error > 32767)
-                            predicted_error = 32767;
-                        if (predicted_error < -32768)
-                            predicted_error = -32768;
-                        Mode4PredictedErrorX = (int16_t)predicted_error;
-
-                        speed_feedforward =
-                            MODE4_FEEDFORWARD_GAIN * (float)Mode4TargetVelocityX;
-
-                        if (predicted_error > ERROR_DEADBAND ||
-                            predicted_error < -ERROR_DEADBAND ||
-                            Mode4TargetVelocityX > MODE4_MOVING_SPEED ||
-                            Mode4TargetVelocityX < -MODE4_MOVING_SPEED)
-                            EMM_Visual_Control_FF(&Yaw_Motor, &Yaw_PID,
-                                                  (float)predicted_error,
-                                                  speed_feedforward);
-                        else
-                            StopMotor();
-                    }
+                    /* Keep the last command between two vision frames. */
                 }
                 else
                 {
@@ -489,7 +463,7 @@ void TIM2_IRQHandler(void)
                     Mode4PredictedErrorX = 0;
                 }
             }
-            control_tick_ms = 0;
+            tim_10ms = 0;
         }
 
         Key_Tick();

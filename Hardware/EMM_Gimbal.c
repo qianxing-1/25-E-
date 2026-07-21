@@ -5,58 +5,6 @@
 #define TRACK_MIN_SPEED       16.0f
 #define TRACK_MAX_SPEED       600.0f
 #define TRACK_SPEED_RAMP      80.0f
-#define MODE4_SPEED_RAMP      40.0f
-
-static void EMM_Apply_Speed_Command(EMM_Motor *motor, float target_speed,
-                                    float speed_ramp)
-{
-    float speed;
-    float current_speed;
-    uint8_t desired_direction;
-
-    speed = (target_speed >= 0.0f) ? target_speed : -target_speed;
-    if (speed < 1.0f)
-    {
-        STEP_PWM_SetFreq(0);
-        motor->Step_Frequency = 0;
-        EMM_Disable(motor);
-        return;
-    }
-
-    if (speed < TRACK_MIN_SPEED)
-        speed = TRACK_MIN_SPEED;
-    if (speed > TRACK_MAX_SPEED)
-        speed = TRACK_MAX_SPEED;
-
-    desired_direction = (target_speed >= 0.0f) ? 0 : 1;
-
-    /* Stop STEP, satisfy DIR setup time, then resume at the new speed. */
-    if (desired_direction != motor->Direction)
-    {
-        STEP_PWM_SetFreq(0);
-        motor->Step_Frequency = 0;
-        EMM_Set_Direction(motor, desired_direction);
-        Delay_us(5);
-    }
-
-    current_speed = motor->Step_Frequency;
-    EMM_Enable(motor);
-
-    if (speed > current_speed + speed_ramp)
-        current_speed += speed_ramp;
-    else if (speed + speed_ramp < current_speed)
-        current_speed -= speed_ramp;
-    else
-        current_speed = speed;
-
-    if (current_speed < TRACK_MIN_SPEED)
-        current_speed = TRACK_MIN_SPEED;
-    if (current_speed > TRACK_MAX_SPEED)
-        current_speed = TRACK_MAX_SPEED;
-
-    motor->Step_Frequency = current_speed;
-    STEP_PWM_SetFreq((uint32_t)current_speed);
-}
 
 void EMM_Motor_Init(EMM_Motor *motor)
 {
@@ -135,27 +83,50 @@ float PID_Calculate(PID_Controller *pid, float error)
 void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
                         float image_error)
 {
+    float speed;
     float target_speed;
+    uint8_t desired_direction;
 
     target_speed = PID_Calculate(pid, image_error);
-    EMM_Apply_Speed_Command(motor, target_speed, TRACK_SPEED_RAMP);
-}
+    speed = (target_speed >= 0.0f) ? target_speed : -target_speed;
+    if (speed < TRACK_MIN_SPEED)
+        speed = TRACK_MIN_SPEED;
+    if (speed > TRACK_MAX_SPEED)
+        speed = TRACK_MAX_SPEED;
 
-void EMM_Visual_Control_FF(EMM_Motor *motor, PID_Controller *pid,
-                           float image_error, float speed_feedforward)
-{
-    float target_speed;
+    desired_direction = (target_speed >= 0.0f) ? 0 : 1;
 
-    target_speed = PID_Calculate(pid, image_error) + speed_feedforward;
-    if (target_speed > pid->Max_Output)
-        target_speed = pid->Max_Output;
-    if (target_speed < pid->Min_Output)
-        target_speed = pid->Min_Output;
+    /* Stop STEP, satisfy DIR setup time, then resume at the new speed. */
+    if (desired_direction != motor->Direction)
+    {
+        STEP_PWM_SetFreq(0);
+        motor->Step_Frequency = 0;
+        EMM_Set_Direction(motor, desired_direction);
+        Delay_us(5);
+    }
 
-    EMM_Apply_Speed_Command(motor, target_speed, MODE4_SPEED_RAMP);
+    EMM_Set_Speed(motor, speed);
 }
 
 void EMM_Set_Speed(EMM_Motor *motor, float frequency)
 {
-    EMM_Apply_Speed_Command(motor, frequency, TRACK_SPEED_RAMP);
+    float current_speed = motor->Step_Frequency;
+
+    EMM_Enable(motor);
+
+    /* Slew the command so every new vision frame does not cause a speed jump. */
+    if (frequency > current_speed + TRACK_SPEED_RAMP)
+        current_speed += TRACK_SPEED_RAMP;
+    else if (frequency + TRACK_SPEED_RAMP < current_speed)
+        current_speed -= TRACK_SPEED_RAMP;
+    else
+        current_speed = frequency;
+
+    if (current_speed < TRACK_MIN_SPEED)
+        current_speed = TRACK_MIN_SPEED;
+    if (current_speed > TRACK_MAX_SPEED)
+        current_speed = TRACK_MAX_SPEED;
+
+    motor->Step_Frequency = current_speed;
+    STEP_PWM_SetFreq((uint32_t)current_speed);
 }
